@@ -1,4 +1,4 @@
-# TwinMind Copilot
+# Meeting Copilot
 
 A real-time AI meeting copilot that actually pays attention
 so you don't have to.
