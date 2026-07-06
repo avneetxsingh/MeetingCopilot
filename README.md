@@ -233,7 +233,3 @@ Suggestions return as a single JSON object. Streaming partial
 JSON isn't worth the parsing complexity. Chat streams because
 that feels responsive. Suggestions don't because the whole
 batch lands at once anyway.
-
----
-
-*Built for the TwinMind engineering challenge. The app listens so you don't have to.*
