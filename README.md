@@ -184,11 +184,12 @@ a message to SQS (with a DLQ for messages that exhaust their retries)
 instead of calling Bedrock inline, so a slow or throttled embedding call
 never delays the chunk response the caller is waiting on; a separate
 `embedWorker` Lambda consumes the queue and writes the vector.
-Retrieval — both for `/v1/search` and for the `relevant_history` block
-injected into the suggestion prompt on each new chunk — is **best-effort**:
-if the embed or vector-query call fails, the handler logs it, treats
-history/results as empty, and still returns 200; a memory outage never
-blocks transcription or suggestions. The suggestion-time retrieval is also
+Retrieval of `relevant_history` (injected into the suggestion prompt on
+each new chunk) is **best-effort**: if embedding or vector queries fail, the
+handler logs the error, treats history as empty, and still returns 200 — a
+memory outage never blocks transcription or suggestions. By contrast,
+`/v1/search` intentionally fails with a 5xx error on embedding failures to
+avoid silently returning empty results. The suggestion-time retrieval is also
 **cross-session-only** (`excludeSessId` scopes it to the account's *other*
 sessions) — it's meant to surface a relevant decision from a past meeting,
 not restate what's already on screen from the current one.
