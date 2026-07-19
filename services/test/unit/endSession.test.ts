@@ -39,6 +39,30 @@ describe("POST /v1/sessions/{id}/end", () => {
     expect(body.status).toBe("ended");
     expect(body.summary).toBe("Shipped decision");
     expect(body.actionItems).toHaveLength(1);
+
+    const updateCalls = ddbMock.commandCalls(UpdateCommand);
+    expect(updateCalls).toHaveLength(2);
+    const secondInput = updateCalls[1].args[0].input;
+    expect(secondInput.Key).toEqual({ PK: "ACCT#A1", SK: "SESS#S1" });
+    expect(secondInput.UpdateExpression).toContain("summary");
+    expect(secondInput.UpdateExpression).toContain("actionItems");
+    expect(secondInput.ExpressionAttributeValues).toMatchObject({
+      ":s": "Shipped decision",
+      ":a": [{ owner: null, task: "ship friday" }],
+    });
+  });
+  test("does not query chunks when session end is rejected", async () => {
+    ddbMock.on(QueryCommand).resolves({ Items: [{ acctId: "A1", groqKeyEnc: "x" }] });
+    const err = new Error("cond"); err.name = "ConditionalCheckFailedException";
+    ddbMock.on(UpdateCommand).rejects(err);
+    const res = await handler(authedEvent as never);
+    expect(res.statusCode).toBe(409);
+
+    const queryCalls = ddbMock.commandCalls(QueryCommand);
+    expect(queryCalls.length).toBeGreaterThan(0);
+    for (const call of queryCalls) {
+      expect(call.args[0].input.IndexName).toBe("GSI1");
+    }
   });
   test("still ends the session when summary generation fails", async () => {
     ddbMock.on(QueryCommand).resolvesOnce({ Items: [{ acctId: "A1" }] }) // no groqKeyEnc → getGroqKey throws
