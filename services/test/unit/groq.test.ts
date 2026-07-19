@@ -54,4 +54,9 @@ describe("groq client", () => {
     expect(parsed.model).toBe("openai/gpt-oss-120b");
     expect(parsed.response_format).toBeUndefined();
   });
+  test("chatText throws 502 when content is missing", async () => {
+    fake = await startFakeGroq({ chatRaw: null });
+    process.env.GROQ_BASE_URL = fake.url;
+    await expect(chatText("gsk_x", "s", "u")).rejects.toMatchObject({ status: 502, code: "groq_upstream" });
+  });
 });
