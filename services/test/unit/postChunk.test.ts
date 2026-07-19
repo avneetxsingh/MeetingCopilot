@@ -3,6 +3,7 @@ import { mockClient } from "aws-sdk-client-mock";
 import { DynamoDBDocumentClient, PutCommand, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { KMSClient, DecryptCommand } from "@aws-sdk/client-kms";
 import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { SendMessageCommand, SQSClient } from "@aws-sdk/client-sqs";
 import { generateApiKey } from "../../src/lib/auth";
 import { handler } from "../../src/handlers/postChunk";
 import { startFakeGroq } from "../helpers/fakeGroq";
@@ -10,6 +11,7 @@ import { startFakeGroq } from "../helpers/fakeGroq";
 const ddbMock = mockClient(DynamoDBDocumentClient);
 const kmsMock = mockClient(KMSClient);
 const s3Mock = mockClient(S3Client);
+const sqsMock = mockClient(SQSClient);
 
 let fake: { url: string; close(): void } | undefined;
 
@@ -17,10 +19,12 @@ beforeEach(() => {
   ddbMock.reset();
   kmsMock.reset();
   s3Mock.reset();
+  sqsMock.reset();
   process.env.KEY_PEPPER = "p";
   process.env.TABLE_NAME = "t";
   process.env.BUCKET_NAME = "b";
   process.env.KMS_KEY_ID = "kms-key-1";
+  process.env.EMBED_QUEUE_URL = "https://q";
 });
 
 afterEach(() => {
@@ -151,5 +155,40 @@ describe("POST /v1/sessions/{id}/chunks", () => {
       SK: "CHUNK#000003",
       audioKey: "A1/S1/chunk-3.wav",
     });
+
+    const sendCalls = sqsMock.commandCalls(SendMessageCommand);
+    expect(sendCalls).toHaveLength(1);
+    expect(sendCalls[0].args[0].input.QueueUrl).toBe("https://q");
+    const sentBody = sendCalls[0].args[0].input.MessageBody as string;
+    expect(sentBody).toContain(`"sessId":"S1"`);
+    expect(sentBody).toContain("hello roadmap");
+  });
+
+  test("200 still returned when the embed enqueue fails (non-fatal)", async () => {
+    fake = await startFakeGroq({ transcript: "hello roadmap", chat: { suggestions: [{ type: "QUESTION", preview: "p2", detail_prompt: "d2" }] } });
+    process.env.GROQ_BASE_URL = fake.url;
+
+    ddbMock
+      .on(QueryCommand)
+      .resolvesOnce({ Items: [{ acctId: "A1", name: "n", groqKeyEnc: "enc" }] })
+      .resolves({
+        Items: [{ transcript: "earlier", suggestions: [{ type: "QUESTION", preview: "p", detail_prompt: "d" }] }],
+      });
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { chunkCount: 3 } });
+    ddbMock.on(PutCommand).resolves({});
+    kmsMock.on(DecryptCommand).resolves({ Plaintext: Buffer.from("gsk_k") });
+    s3Mock.on(PutObjectCommand).resolves({});
+    sqsMock.on(SendMessageCommand).rejects(new Error("sqs down"));
+
+    const res = await handler({
+      headers: { authorization: `Bearer ${generateApiKey()}`, "content-type": "audio/wav" },
+      pathParameters: { id: "S1" },
+      body: Buffer.alloc(200, "a").toString("base64"),
+      isBase64Encoded: true,
+    } as never);
+
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body!);
+    expect(body.transcript).toBe("hello roadmap");
   });
 });

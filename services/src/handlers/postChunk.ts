@@ -1,5 +1,6 @@
 import type { APIGatewayProxyEventV2 } from "aws-lambda";
 import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { SendMessageCommand, SQSClient } from "@aws-sdk/client-sqs";
 import { PutCommand, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { extFromContentType } from "../lib/audio";
 import { requireAccount } from "../lib/auth";
@@ -11,6 +12,7 @@ import { acctPk, chunkSk, sessPk, sessSk } from "../lib/keys";
 import { generateSuggestionsSafe, type Suggestion } from "../lib/suggestions";
 
 const s3 = new S3Client({});
+const sqsClient = new SQSClient({});
 
 export const handler = async (event: APIGatewayProxyEventV2) => {
   try {
@@ -75,6 +77,7 @@ export const handler = async (event: APIGatewayProxyEventV2) => {
       lastSuggestions,
     );
 
+    const createdAt = new Date().toISOString();
     await ddb.send(
       new PutCommand({
         TableName: tableName(),
@@ -85,10 +88,21 @@ export const handler = async (event: APIGatewayProxyEventV2) => {
           transcript,
           suggestions,
           audioKey,
-          createdAt: new Date().toISOString(),
+          createdAt,
         },
       }),
     );
+
+    try {
+      await sqsClient.send(
+        new SendMessageCommand({
+          QueueUrl: process.env.EMBED_QUEUE_URL!,
+          MessageBody: JSON.stringify({ acctId: acct.acctId, sessId, seq, transcript, createdAt }),
+        }),
+      );
+    } catch (e) {
+      console.error("embed enqueue failed (non-fatal)", e); // memory is best-effort; the chunk response must not fail
+    }
 
     return json(200, { seq, transcript, suggestions, ...(warning ? { warning } : {}) });
   } catch (e) {
