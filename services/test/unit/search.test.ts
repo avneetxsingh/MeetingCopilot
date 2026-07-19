@@ -29,6 +29,14 @@ describe("GET /v1/search", () => {
     expect(res.statusCode).toBe(422);
     expect(JSON.parse(res.body!).error.code).toBe("missing_query");
   });
+  test("422 for empty or whitespace-only q", async () => {
+    const resEmpty = await handler({ ...authed(), queryStringParameters: { q: "" } } as never);
+    expect(resEmpty.statusCode).toBe(422);
+    expect(JSON.parse(resEmpty.body!).error.code).toBe("missing_query");
+    const resWhitespace = await handler({ ...authed(), queryStringParameters: { q: "   " } } as never);
+    expect(resWhitespace.statusCode).toBe(422);
+    expect(JSON.parse(resWhitespace.body!).error.code).toBe("missing_query");
+  });
   test("200 embeds the query and returns account-filtered hits", async () => {
     brMock.on(InvokeModelCommand).resolves({ body: new TextEncoder().encode(JSON.stringify({ embedding: [0.9] })) } as never);
     svMock.on(QueryVectorsCommand).resolves({
