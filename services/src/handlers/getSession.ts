@@ -15,6 +15,8 @@ export const handler = async (event: APIGatewayProxyEventV2) => {
       new GetCommand({ TableName: tableName(), Key: { PK: acctPk(acct.acctId), SK: sessSk(id) } }),
     );
     if (!sess.Item) throw new ApiError(404, "session_not_found", "No session with that id");
+    // This query is keyed by the raw session id (not the account) and is only safe because the
+    // account-scoped GetCommand above already proved ownership — do not reorder these two calls.
     const chunks = await ddb.send(
       new QueryCommand({
         TableName: tableName(),
