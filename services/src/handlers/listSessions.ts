@@ -18,7 +18,7 @@ export const handler = async (event: APIGatewayProxyEventV2) => {
       }),
     );
     return json(200, {
-      sessions: (res.Items ?? []).map(({ PK, SK, ...pub }) => pub),
+      sessions: (res.Items ?? []).map(({ PK, SK, ...pub }) => ({ ...pub, id: pub.sessId })),
     });
   } catch (e) {
     return errorResponse(e);

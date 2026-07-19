@@ -33,7 +33,7 @@ describe("GET /v1/sessions", () => {
     expect(res.statusCode).toBe(200);
     const body = JSON.parse(res.body!);
     expect(body.sessions).toEqual([
-      { sessId: "S1", title: "Standup", kind: "meeting", status: "active" },
+      { sessId: "S1", title: "Standup", kind: "meeting", status: "active", id: "S1" },
     ]);
 
     // Distinguish the data call from the auth call by input shape (auth call has IndexName "GSI1").

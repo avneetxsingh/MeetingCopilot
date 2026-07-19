@@ -9,7 +9,12 @@ import { acctPk } from "../lib/keys";
 export const handler = async (event: APIGatewayProxyEventV2) => {
   try {
     const acct = await requireAccount(event);
-    const body = event.body ? JSON.parse(event.body) : {};
+    let body;
+    try {
+      body = event.body ? JSON.parse(event.body) : {};
+    } catch {
+      throw new ApiError(400, "invalid_json", "Request body is not valid JSON");
+    }
     if (typeof body.groqKey !== "string" || !body.groqKey.startsWith("gsk_"))
       throw new ApiError(422, "invalid_groq_key", "Expected { groqKey: \"gsk_...\" }");
     const groqKeyEnc = await encryptGroqKey(body.groqKey);

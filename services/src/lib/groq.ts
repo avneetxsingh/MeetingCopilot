@@ -17,7 +17,10 @@ export async function transcribe(groqKey: string, audio: Buffer, filename: strin
     body: form,
   });
   checkStatus(res.status);
-  return ((await res.json()) as { text: string }).text;
+  const data = await res.json();
+  const text = (data as { text?: unknown }).text;
+  if (typeof text !== "string") throw new ApiError(502, "groq_upstream", "Groq transcription returned no text");
+  return text;
 }
 
 export async function chatJson(groqKey: string, system: string, user: string): Promise<unknown> {

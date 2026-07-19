@@ -8,7 +8,7 @@ export interface FakeGroqRequest {
   body: string;
 }
 
-export function startFakeGroq(responses: { transcript?: string; chat?: unknown; status?: number }) {
+export function startFakeGroq(responses: { transcript?: string | null; chat?: unknown; status?: number }) {
   const requests: FakeGroqRequest[] = [];
   const server = createServer((req, res) => {
     const chunks: Buffer[] = [];
@@ -27,7 +27,8 @@ export function startFakeGroq(responses: { transcript?: string; chat?: unknown; 
       }
       if (req.url?.includes("/audio/transcriptions")) {
         res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ text: responses.transcript ?? "hello world" }));
+        // transcript: null means "omit the text field" — simulates a malformed upstream response.
+        res.end(JSON.stringify(responses.transcript === null ? {} : { text: responses.transcript ?? "hello world" }));
       } else if (req.url?.includes("/chat/completions")) {
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(responses.chat ?? {}) } }] }));

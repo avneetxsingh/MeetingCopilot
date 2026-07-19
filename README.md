@@ -57,7 +57,8 @@ TABLE_NAME=<TableName output> npx tsx scripts/create-account.ts "my account"
 This prints an account id and an API key of the form `ut_live_...`. The key
 is shown exactly once — copy it now. Platform keys are stored as a peppered
 HMAC hash, never in plaintext, so if you lose it you'll need to mint a new
-account.
+account. If you set `UNDERTONE_PEPPER` when deploying the stack, set that same
+value for this command too, or hashes won't match at auth time.
 
 Store your Groq key on the account (required before transcription/suggestion
 calls will work — Undertone never ships with a shared inference key):

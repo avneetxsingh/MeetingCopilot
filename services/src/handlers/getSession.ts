@@ -27,6 +27,7 @@ export const handler = async (event: APIGatewayProxyEventV2) => {
     const { PK, SK, ...pub } = sess.Item;
     return json(200, {
       ...pub,
+      id: pub.sessId,
       chunks: (chunks.Items ?? []).map(({ seq, transcript, suggestions, createdAt }) => ({
         seq, transcript, suggestions, createdAt,
       })),

@@ -6,7 +6,7 @@ import { generateApiKey, hashApiKey } from "../services/src/lib/auth";
 const name = process.argv[2] ?? "default";
 const tableName = process.env.TABLE_NAME;
 if (!tableName) throw new Error("Set TABLE_NAME to the deployed table name (CDK output)");
-const pepper = process.env.KEY_PEPPER ?? "dev-pepper-change-me";
+const pepper = process.env.UNDERTONE_PEPPER ?? process.env.KEY_PEPPER ?? "dev-pepper-change-me";
 
 const apiKey = generateApiKey();
 const acctId = ulid();

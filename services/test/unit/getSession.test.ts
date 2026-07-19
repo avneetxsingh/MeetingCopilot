@@ -70,6 +70,7 @@ describe("GET /v1/sessions/{id}", () => {
     expect(body.PK).toBeUndefined();
     expect(body.SK).toBeUndefined();
     expect(body.sessId).toBe("S1");
+    expect(body.id).toBe("S1");
     expect(body.chunks).toEqual([
       { seq: 1, transcript: "hello there", suggestions: ["hi"], createdAt: "2026-01-01T00:00:00.000Z" },
     ]);

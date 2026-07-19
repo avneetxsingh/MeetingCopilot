@@ -37,4 +37,14 @@ describe("POST /v1/sessions", () => {
     } as never);
     expect(res.statusCode).toBe(422);
   });
+  test("400 invalid_json on malformed body", async () => {
+    ddbMock.on(QueryCommand).resolves({ Items: [{ acctId: "A1" }] });
+    const res = await handler({
+      headers: { authorization: `Bearer ${generateApiKey()}` },
+      body: "{not json",
+    } as never);
+    expect(res.statusCode).toBe(400);
+    const body = JSON.parse(res.body!);
+    expect(body.error.code).toBe("invalid_json");
+  });
 });

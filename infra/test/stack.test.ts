@@ -61,6 +61,14 @@ describe("UndertoneStack", () => {
     });
   });
 
+  test("GSI1 projects ALL attributes (auth reads groqKeyEnc off the projected item)", () => {
+    const tables = template.findResources("AWS::DynamoDB::Table");
+    const gsis = Object.values(tables)[0].Properties.GlobalSecondaryIndexes as Array<{
+      Projection: { ProjectionType: string };
+    }>;
+    expect(gsis[0].Projection.ProjectionType).toBe("ALL");
+  });
+
   test("audio bucket blocks all four public access vectors", () => {
     template.hasResourceProperties("AWS::S3::Bucket", {
       PublicAccessBlockConfiguration: {

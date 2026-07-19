@@ -40,4 +40,9 @@ describe("groq client", () => {
     process.env.GROQ_BASE_URL = fake.url;
     await expect(transcribe("gsk_x", Buffer.from("a"), "c.wav")).rejects.toMatchObject({ status: 502, code: "groq_upstream" });
   });
+  test("transcribe rejects with 502 groq_upstream when the response has no text field", async () => {
+    fake = await startFakeGroq({ transcript: null });
+    process.env.GROQ_BASE_URL = fake.url;
+    await expect(transcribe("gsk_x", Buffer.from("a"), "c.wav")).rejects.toMatchObject({ status: 502, code: "groq_upstream" });
+  });
 });

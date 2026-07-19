@@ -46,6 +46,18 @@ describe("PUT /v1/account/groq-key", () => {
     expect(kmsMock.commandCalls(EncryptCommand)).toHaveLength(0);
   });
 
+  test("400 invalid_json on malformed body", async () => {
+    ddbMock.on(QueryCommand).resolves({ Items: [{ acctId: "A1", name: "n" }] });
+    const res = await handler({
+      headers: { authorization: `Bearer ${generateApiKey()}` },
+      body: "{not json",
+    } as never);
+    expect(res.statusCode).toBe(400);
+    const body = JSON.parse(res.body!);
+    expect(body.error.code).toBe("invalid_json");
+    expect(kmsMock.commandCalls(EncryptCommand)).toHaveLength(0);
+  });
+
   test("200 happy path encrypts the key and scopes the update to the authenticated account", async () => {
     ddbMock.on(QueryCommand).resolves({ Items: [{ acctId: "A1", name: "n" }] });
     kmsMock.on(EncryptCommand).resolves({ CiphertextBlob: Buffer.from("cipher") });

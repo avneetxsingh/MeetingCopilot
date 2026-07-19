@@ -11,7 +11,12 @@ const KINDS = ["meeting", "interview", "lecture"] as const;
 export const handler = async (event: APIGatewayProxyEventV2) => {
   try {
     const acct = await requireAccount(event);
-    const body = event.body ? JSON.parse(event.body) : {};
+    let body;
+    try {
+      body = event.body ? JSON.parse(event.body) : {};
+    } catch {
+      throw new ApiError(400, "invalid_json", "Request body is not valid JSON");
+    }
     const kind = body.kind ?? "meeting";
     if (!KINDS.includes(kind)) throw new ApiError(422, "invalid_kind", `kind must be one of ${KINDS.join(", ")}`);
     const id = ulid();
