@@ -25,11 +25,12 @@ key — the platform operator pays $0 for inference.
                                    └──────────────────────────────────────────┘
 ```
 
-Phase 1 (this repo, today) implements the core pipeline: `sessions` +
-`chunks` API, Groq transcription and suggestions, DynamoDB persistence, and
-API-key auth, all defined as CDK infrastructure-as-code. The Vercel demo app,
-memory/RAG (embeddings + `/search`), and webhooks are roadmap — see the API
-table below and the design spec for the full three-phase plan.
+Phase 1 implements the core pipeline: `sessions` + `chunks` API, Groq
+transcription and suggestions, DynamoDB persistence, and API-key auth. Phase
+2 (this repo, today) adds memory/RAG on top: async embeddings, semantic
+`/search`, and a `/chat` deep-dive endpoint that grounds replies in a
+session's transcript. The Vercel demo app and webhooks are still roadmap —
+see the API table below and the design spec for the full three-phase plan.
 
 ## Quick Start
 
@@ -91,7 +92,8 @@ curl -X POST "$API/v1/sessions/01H.../end" \
 ```
 
 Once a stack is deployed, run the end-to-end smoke test — it exercises every
-phase-1 endpoint against the live stack and doubles as a demo rehearsal:
+phase-1 and phase-2 endpoint against the live stack and doubles as a demo
+rehearsal:
 
 ```bash
 UNDERTONE_API=$API UNDERTONE_KEY=$KEY npx tsx scripts/smoke.ts
@@ -109,11 +111,23 @@ Auth on every request: `authorization: Bearer ut_live_...`.
 | POST | `/v1/sessions/{id}/end` | close session; generates summary + action items | shipped |
 | GET | `/v1/sessions` | list sessions for the account | shipped |
 | PUT | `/v1/account/groq-key` | store the account's Groq key (KMS-encrypted) | shipped |
-| GET | `/v1/search?q=...` | semantic search across the account's sessions | roadmap (phase 2 — memory/RAG) |
-| POST | `/v1/chat` | suggestion deep-dive (streamed) | roadmap (phase 2) |
+| GET | `/v1/search?q=...` | semantic search across the account's sessions | shipped |
+| POST | `/v1/chat` | suggestion/session deep-dive, grounded in transcript | shipped |
 | CRUD | `/v1/webhooks` | manage webhook subscriptions | roadmap (phase 3) |
 
 `/v1/` is reserved for versioning; breaking changes ship as `/v2/`.
+
+**Known limitation.** `/v1/search` (and the cross-session history that
+`/v1/sessions/{id}/chunks` retrieves internally) depends on Bedrock Titan
+embeddings, which run through each account's AWS environment. New AWS
+accounts often start with a Bedrock model-invocation quota of `0.0` for
+Titan Embed Text v2 until you request an increase — check and raise it in
+the Service Quotas console (**Service Quotas → AWS services → Amazon
+Bedrock → search "Titan Text Embeddings V2"**) before expecting embeddings
+or search results to appear. Chunk ingestion and `/v1/chat` are unaffected —
+they run through Groq, not Bedrock, and work regardless of Bedrock quota.
+`/v1/chat` is a plain (non-streamed) JSON response today; streaming is
+roadmap.
 
 ## Design decisions
 
@@ -159,3 +173,22 @@ base URL reads from `GROQ_BASE_URL` (defaulting to `https://api.groq.com`),
 so tests and integration runs can point the Lambdas at a local fake HTTP
 server (`services/test/helpers/fakeGroq.ts`) instead of the real Groq API —
 no network calls, no real API key, in unit tests.
+
+**Memory/RAG: async, best-effort, cross-session-only.** Each chunk's
+transcript is embedded with **Bedrock Titan Text Embeddings V2 at 1024
+dimensions** and written to an **account-namespaced S3 Vectors index**
+(every vector's metadata carries `acctId`, and every query filters on it
+with `{ acctId: { $eq: acctId } }` — one account can never retrieve
+another's vectors). Embedding happens off the hot path: `postChunk` enqueues
+a message to SQS (with a DLQ for messages that exhaust their retries)
+instead of calling Bedrock inline, so a slow or throttled embedding call
+never delays the chunk response the caller is waiting on; a separate
+`embedWorker` Lambda consumes the queue and writes the vector.
+Retrieval — both for `/v1/search` and for the `relevant_history` block
+injected into the suggestion prompt on each new chunk — is **best-effort**:
+if the embed or vector-query call fails, the handler logs it, treats
+history/results as empty, and still returns 200; a memory outage never
+blocks transcription or suggestions. The suggestion-time retrieval is also
+**cross-session-only** (`excludeSessId` scopes it to the account's *other*
+sessions) — it's meant to surface a relevant decision from a past meeting,
+not restate what's already on screen from the current one.

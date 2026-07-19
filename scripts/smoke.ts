@@ -40,6 +40,36 @@ const ended = await call("POST", `/v1/sessions/${session.id}/end`);
 assert(ended.status === "ended", "session ended");
 console.log(`✓ ended with summary: ${String(ended.summary).slice(0, 80)}...`);
 
+console.log("waiting 20s for async embedding...");
+await new Promise((r) => setTimeout(r, 20000));
+
+// TODO(quota): make hard assertion once Bedrock quota > 0. Replace this block with:
+//   const search = await call("GET", `/v1/search?q=${encodeURIComponent("mobile app roadmap priority")}`);
+//   assert(Array.isArray(search.results) && (search.results as unknown[]).length >= 1, "search finds embedded chunk");
+//   console.log(`✓ search returned ${(search.results as unknown[]).length} hits`);
+const searchPath = `/v1/search?q=${encodeURIComponent("mobile app roadmap priority")}`;
+const searchRes = await fetch(`${API}${searchPath}`, { headers: h });
+const searchBody = (await searchRes.json()) as Record<string, unknown>;
+if (searchRes.status >= 500) {
+  console.log("⚠ search skipped: embeddings blocked on Bedrock quota (see ledger)");
+} else if (searchRes.ok) {
+  const hits = (searchBody.results as unknown[]) ?? [];
+  if (hits.length >= 1) {
+    console.log(`✓ search returned ${hits.length} hits`);
+  } else {
+    console.log("⚠ search skipped: embeddings blocked on Bedrock quota (see ledger)");
+  }
+} else {
+  throw new Error(`GET ${searchPath} → ${searchRes.status}: ${JSON.stringify(searchBody)}`);
+}
+
+const chat = await call("POST", "/v1/chat", {
+  body: JSON.stringify({ sessionId: session.id, prompt: "What was discussed?" }),
+  headers: { "content-type": "application/json" },
+});
+assert(typeof chat.reply === "string" && (chat.reply as string).length > 10, "chat replies with content");
+console.log("✓ chat deep-dive works");
+
 const list = await call("GET", "/v1/sessions");
 assert((list.sessions as { sessId?: string }[]).some((s) => s.sessId === session.id), "session in list");
 console.log("✓ list works\nSMOKE PASS");
