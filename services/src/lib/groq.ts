@@ -9,7 +9,7 @@ function checkStatus(status: number) {
 
 export async function transcribe(groqKey: string, audio: Buffer, filename: string): Promise<string> {
   const form = new FormData();
-  form.append("file", new Blob([audio]), filename);
+  form.append("file", new Blob([new Uint8Array(audio)]), filename);
   form.append("model", "whisper-large-v3");
   const res = await fetch(`${base()}/openai/v1/audio/transcriptions`, {
     method: "POST",
