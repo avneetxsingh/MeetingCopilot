@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "vitest";
-import { chatJson, transcribe } from "../../src/lib/groq";
+import { chatJson, chatText, transcribe } from "../../src/lib/groq";
 import { startFakeGroq, type FakeGroqRequest } from "../helpers/fakeGroq";
 
 let fake: { url: string; close(): void; requests: FakeGroqRequest[] } | undefined;
@@ -44,5 +44,14 @@ describe("groq client", () => {
     fake = await startFakeGroq({ transcript: null });
     process.env.GROQ_BASE_URL = fake.url;
     await expect(transcribe("gsk_x", Buffer.from("a"), "c.wav")).rejects.toMatchObject({ status: 502, code: "groq_upstream" });
+  });
+  test("chatText returns raw content without json mode", async () => {
+    fake = await startFakeGroq({ chatRaw: "Here is the detail you asked for." });
+    process.env.GROQ_BASE_URL = fake.url;
+    expect(await chatText("gsk_x", "sys", "user")).toBe("Here is the detail you asked for.");
+    const req = fake.requests.at(-1)!;
+    const parsed = JSON.parse(req.body);
+    expect(parsed.model).toBe("openai/gpt-oss-120b");
+    expect(parsed.response_format).toBeUndefined();
   });
 });

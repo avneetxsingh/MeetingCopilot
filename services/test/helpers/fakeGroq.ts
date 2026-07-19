@@ -8,7 +8,7 @@ export interface FakeGroqRequest {
   body: string;
 }
 
-export function startFakeGroq(responses: { transcript?: string | null; chat?: unknown; status?: number }) {
+export function startFakeGroq(responses: { transcript?: string | null; chat?: unknown; chatRaw?: string; status?: number }) {
   const requests: FakeGroqRequest[] = [];
   const server = createServer((req, res) => {
     const chunks: Buffer[] = [];
@@ -31,7 +31,8 @@ export function startFakeGroq(responses: { transcript?: string | null; chat?: un
         res.end(JSON.stringify(responses.transcript === null ? {} : { text: responses.transcript ?? "hello world" }));
       } else if (req.url?.includes("/chat/completions")) {
         res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(responses.chat ?? {}) } }] }));
+        const content = responses.chatRaw ?? JSON.stringify(responses.chat ?? {});
+        res.end(JSON.stringify({ choices: [{ message: { content } }] }));
       } else {
         res.writeHead(404);
         res.end();
