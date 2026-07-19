@@ -167,7 +167,12 @@ OUTPUT — JSON ONLY, NO OTHER TEXT:
     { "type": "...", "preview": "...", "detail_prompt": "..." },
     { "type": "...", "preview": "...", "detail_prompt": "..." }
   ]
-}`;
+}
+
+RELEVANT HISTORY RULE:
+The input may include a RELEVANT HISTORY section containing moments from this user's PAST sessions, each prefixed with its date in [YYYY-MM-DD] form.
+When a suggestion draws on that history, its preview MUST cite the date naturally (e.g. "On 2026-07-01 you decided...").
+Use history ONLY when it is genuinely relevant to the current moment. NEVER invent history that is not in the RELEVANT HISTORY section. If the section says "none", behave exactly as before.`;
 
 export const SUMMARY_PROMPT = `You summarize completed meeting transcripts.
 Reply with JSON exactly: {"summary": "<summary of at most 150 words>", "action_items": [{"owner": "<name or null>", "task": "<task>"}]}.

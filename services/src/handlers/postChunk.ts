@@ -5,11 +5,13 @@ import { PutCommand, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { extFromContentType } from "../lib/audio";
 import { requireAccount } from "../lib/auth";
 import { ddb, tableName } from "../lib/ddb";
+import { embedText } from "../lib/embeddings";
 import { ApiError, errorResponse, json } from "../lib/errors";
 import { transcribe } from "../lib/groq";
 import { getGroqKey } from "../lib/groqKey";
 import { acctPk, chunkSk, sessPk, sessSk } from "../lib/keys";
 import { generateSuggestionsSafe, type Suggestion } from "../lib/suggestions";
+import { searchVectors, type VectorHit } from "../lib/vectors";
 
 const s3 = new S3Client({});
 const sqsClient = new SQSClient({});
@@ -71,10 +73,19 @@ export const handler = async (event: APIGatewayProxyEventV2) => {
     const priorChunks = (prior.Items ?? []) as { transcript: string; suggestions: Suggestion[] }[];
     const lastSuggestions = priorChunks.at(-1)?.suggestions ?? [];
 
+    let relevantHistory: VectorHit[] = [];
+    try {
+      const embedding = await embedText(transcript);
+      relevantHistory = await searchVectors(embedding, acct.acctId, 4, sessId);
+    } catch (e) {
+      console.error("history retrieval failed (non-fatal)", e);
+    }
+
     const { suggestions, warning } = await generateSuggestionsSafe(
       groqKey,
       [...priorChunks.map((c) => c.transcript), transcript],
       lastSuggestions,
+      relevantHistory,
     );
 
     const createdAt = new Date().toISOString();

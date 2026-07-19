@@ -12,6 +12,15 @@ describe("buildSuggestionInput", () => {
     expect(out).toContain("RECENT TRANSCRIPT:\nb\nc");
     expect(out).toContain('"type":"QUESTION"');
   });
+  test("includes formatted relevant history with dates", () => {
+    const out = buildSuggestionInput(["a"], [], 2, [
+      { sessId: "S0", seq: 1, text: "we chose postgres", createdAt: "2026-07-01T10:00:00.000Z" },
+    ]);
+    expect(out).toContain("RELEVANT HISTORY:\n[2026-07-01] we chose postgres");
+  });
+  test("empty history renders none", () => {
+    expect(buildSuggestionInput(["a"], [])).toContain("RELEVANT HISTORY:\nnone");
+  });
 });
 
 describe("generateSuggestionsSafe", () => {

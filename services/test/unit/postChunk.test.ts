@@ -4,27 +4,35 @@ import { DynamoDBDocumentClient, PutCommand, QueryCommand, UpdateCommand } from 
 import { KMSClient, DecryptCommand } from "@aws-sdk/client-kms";
 import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { SendMessageCommand, SQSClient } from "@aws-sdk/client-sqs";
+import { BedrockRuntimeClient, InvokeModelCommand } from "@aws-sdk/client-bedrock-runtime";
+import { QueryVectorsCommand, S3VectorsClient } from "@aws-sdk/client-s3vectors";
 import { generateApiKey } from "../../src/lib/auth";
 import { handler } from "../../src/handlers/postChunk";
-import { startFakeGroq } from "../helpers/fakeGroq";
+import { startFakeGroq, type FakeGroqRequest } from "../helpers/fakeGroq";
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
 const kmsMock = mockClient(KMSClient);
 const s3Mock = mockClient(S3Client);
 const sqsMock = mockClient(SQSClient);
+const brMock = mockClient(BedrockRuntimeClient);
+const svMock = mockClient(S3VectorsClient);
 
-let fake: { url: string; close(): void } | undefined;
+let fake: { url: string; close(): void; requests: FakeGroqRequest[] } | undefined;
 
 beforeEach(() => {
   ddbMock.reset();
   kmsMock.reset();
   s3Mock.reset();
   sqsMock.reset();
+  brMock.reset();
+  svMock.reset();
   process.env.KEY_PEPPER = "p";
   process.env.TABLE_NAME = "t";
   process.env.BUCKET_NAME = "b";
   process.env.KMS_KEY_ID = "kms-key-1";
   process.env.EMBED_QUEUE_URL = "https://q";
+  process.env.VECTOR_BUCKET = "vb";
+  process.env.VECTOR_INDEX = "chunks";
 });
 
 afterEach(() => {
@@ -190,5 +198,73 @@ describe("POST /v1/sessions/{id}/chunks", () => {
     expect(res.statusCode).toBe(200);
     const body = JSON.parse(res.body!);
     expect(body.transcript).toBe("hello roadmap");
+  });
+
+  test("200 includes relevant history from past sessions in the suggestions request", async () => {
+    fake = await startFakeGroq({ transcript: "hello roadmap", chat: { suggestions: [{ type: "QUESTION", preview: "p2", detail_prompt: "d2" }] } });
+    process.env.GROQ_BASE_URL = fake.url;
+
+    ddbMock
+      .on(QueryCommand)
+      .resolvesOnce({ Items: [{ acctId: "A1", name: "n", groqKeyEnc: "enc" }] })
+      .resolves({
+        Items: [{ transcript: "earlier", suggestions: [{ type: "QUESTION", preview: "p", detail_prompt: "d" }] }],
+      });
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { chunkCount: 3 } });
+    ddbMock.on(PutCommand).resolves({});
+    kmsMock.on(DecryptCommand).resolves({ Plaintext: Buffer.from("gsk_k") });
+    s3Mock.on(PutObjectCommand).resolves({});
+    brMock.on(InvokeModelCommand).resolves({ body: new TextEncoder().encode(JSON.stringify({ embedding: [0.1, 0.2] })) } as never);
+    svMock.on(QueryVectorsCommand).resolves({
+      vectors: [
+        { key: "A1/S0/000001", distance: 0.1, metadata: { sessId: "S0", seq: 1, text: "we chose postgres", createdAt: "2026-07-01T00:00:00.000Z" } },
+      ],
+    } as never);
+
+    const res = await handler({
+      headers: { authorization: `Bearer ${generateApiKey()}`, "content-type": "audio/wav" },
+      pathParameters: { id: "S1" },
+      body: Buffer.alloc(200, "a").toString("base64"),
+      isBase64Encoded: true,
+    } as never);
+
+    expect(res.statusCode).toBe(200);
+
+    const queryCall = svMock.commandCalls(QueryVectorsCommand)[0];
+    expect(queryCall.args[0].input.filter).toMatchObject({ acctId: { $eq: "A1" } });
+    expect(queryCall.args[0].input.topK).toBe(4);
+
+    const chatRequest = fake.requests.find((r) => r.url.includes("/chat/completions"));
+    expect(chatRequest?.body).toContain("RELEVANT HISTORY");
+    expect(chatRequest?.body).toContain("[2026-07-01]");
+  });
+
+  test("200 still returned when history retrieval (QueryVectorsCommand) rejects (non-fatal)", async () => {
+    fake = await startFakeGroq({ transcript: "hello roadmap", chat: { suggestions: [{ type: "QUESTION", preview: "p2", detail_prompt: "d2" }] } });
+    process.env.GROQ_BASE_URL = fake.url;
+
+    ddbMock
+      .on(QueryCommand)
+      .resolvesOnce({ Items: [{ acctId: "A1", name: "n", groqKeyEnc: "enc" }] })
+      .resolves({
+        Items: [{ transcript: "earlier", suggestions: [{ type: "QUESTION", preview: "p", detail_prompt: "d" }] }],
+      });
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { chunkCount: 3 } });
+    ddbMock.on(PutCommand).resolves({});
+    kmsMock.on(DecryptCommand).resolves({ Plaintext: Buffer.from("gsk_k") });
+    s3Mock.on(PutObjectCommand).resolves({});
+    brMock.on(InvokeModelCommand).resolves({ body: new TextEncoder().encode(JSON.stringify({ embedding: [0.1, 0.2] })) } as never);
+    svMock.on(QueryVectorsCommand).rejects(new Error("vector search down"));
+
+    const res = await handler({
+      headers: { authorization: `Bearer ${generateApiKey()}`, "content-type": "audio/wav" },
+      pathParameters: { id: "S1" },
+      body: Buffer.alloc(200, "a").toString("base64"),
+      isBase64Encoded: true,
+    } as never);
+
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body!);
+    expect(body.suggestions).toEqual([{ type: "QUESTION", preview: "p2", detail_prompt: "d2" }]);
   });
 });
