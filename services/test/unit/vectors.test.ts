@@ -46,4 +46,29 @@ describe("searchVectors", () => {
     svMock.on(QueryVectorsCommand).resolves({ vectors: [] } as never);
     expect(await searchVectors([0.5], "A1")).toEqual([]);
   });
+  test("maps missing metadata fields to safe defaults", async () => {
+    svMock.on(QueryVectorsCommand).resolves({
+      vectors: [
+        { key: "A1/SX/000001", distance: 0.4 },
+        { key: "A1/SY/000002", distance: 0.5, metadata: { sessId: "SY" } },
+      ],
+    } as never);
+    const hits = await searchVectors([0.5], "A1");
+    expect(hits).toEqual([
+      { sessId: "", seq: 0, text: "", createdAt: "", distance: 0.4 },
+      { sessId: "SY", seq: 0, text: "", createdAt: "", distance: 0.5 },
+    ]);
+  });
+  test("returns all hits when excludeSessId is not provided", async () => {
+    svMock.on(QueryVectorsCommand).resolves({
+      vectors: [
+        { key: "A1/S0/000001", distance: 0.1, metadata: { sessId: "S0", seq: 1, text: "first", createdAt: "2026-07-01T00:00:00.000Z" } },
+        { key: "A1/S9/000002", distance: 0.2, metadata: { sessId: "S9", seq: 2, text: "second", createdAt: "2026-07-19T00:00:00.000Z" } },
+      ],
+    } as never);
+    const hits = await searchVectors([0.5], "A1");
+    expect(hits).toHaveLength(2);
+    expect(hits[0].sessId).toBe("S0");
+    expect(hits[1].sessId).toBe("S9");
+  });
 });
