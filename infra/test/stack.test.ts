@@ -18,14 +18,14 @@ describe("UndertoneStack", () => {
       PublicAccessBlockConfiguration: { BlockPublicAcls: true, BlockPublicPolicy: true },
     });
   });
-  test("six API routes", () => {
-    template.resourceCountIs("AWS::ApiGatewayV2::Route", 6);
+  test("eight API routes", () => {
+    template.resourceCountIs("AWS::ApiGatewayV2::Route", 8);
   });
   test("a KMS key exists for groq keys", () => {
     expect(Object.keys(template.findResources("AWS::KMS::Key")).length).toBe(1);
   });
 
-  test("exact set of six route keys (no duplicates, no missing paths)", () => {
+  test("exact set of eight route keys (no duplicates, no missing paths)", () => {
     const routes = template.findResources("AWS::ApiGatewayV2::Route");
     const routeKeys = Object.values(routes).map(
       (r) => (r as { Properties: { RouteKey: string } }).Properties.RouteKey,
@@ -38,6 +38,8 @@ describe("UndertoneStack", () => {
         "POST /v1/sessions/{id}/end",
         "POST /v1/sessions/{id}/chunks",
         "PUT /v1/account/groq-key",
+        "GET /v1/search",
+        "POST /v1/chat",
       ].sort(),
     );
   });
@@ -98,8 +100,45 @@ describe("UndertoneStack", () => {
     expect(policiesContaining("s3:PutObject")).toHaveLength(1);
     // putGroqKey is the only handler that encrypts a stored Groq key.
     expect(policiesContaining("kms:Encrypt")).toHaveLength(1);
-    // postChunk (to read a decrypted key when calling Groq) and endSession
-    // (to decrypt for the final Groq call) are the only two decrypters.
-    expect(policiesContaining("kms:Decrypt")).toHaveLength(2);
+    // postChunk (to read a decrypted key when calling Groq), endSession (to decrypt
+    // for the final Groq call), and chat (to decrypt for its own Groq call) are the
+    // only three decrypters.
+    expect(policiesContaining("kms:Decrypt")).toHaveLength(3);
+  });
+
+  test("embed queue with dlq redrive", () => {
+    template.resourceCountIs("AWS::SQS::Queue", 2);
+    const queues = template.findResources("AWS::SQS::Queue");
+    const redrives = Object.values(queues).filter(
+      (q) => (q as { Properties?: { RedrivePolicy?: unknown } }).Properties?.RedrivePolicy,
+    );
+    expect(redrives.length).toBe(1);
+    expect(
+      (redrives[0] as { Properties: { RedrivePolicy: { maxReceiveCount: number } } }).Properties.RedrivePolicy
+        .maxReceiveCount,
+    ).toBe(3);
+  });
+
+  test("eight API routes including search and chat", () => {
+    const routes = template.findResources("AWS::ApiGatewayV2::Route");
+    const keys = Object.values(routes)
+      .map((r) => (r as { Properties: { RouteKey: string } }).Properties.RouteKey)
+      .sort();
+    expect(keys).toContain("GET /v1/search");
+    expect(keys).toContain("POST /v1/chat");
+    expect(keys.length).toBe(8);
+  });
+
+  test("cors is configured on the http api", () => {
+    template.hasResourceProperties("AWS::ApiGatewayV2::Api", {
+      CorsConfiguration: { AllowHeaders: ["authorization", "content-type"], AllowOrigins: ["*"] },
+    });
+  });
+
+  test("bedrock invoke restricted to titan embed model", () => {
+    const policies = template.findResources("AWS::IAM::Policy");
+    const withBedrock = Object.values(policies).filter((p) => JSON.stringify(p).includes("bedrock:InvokeModel"));
+    expect(withBedrock.length).toBe(3); // embedWorker, postChunk, search
+    expect(JSON.stringify(withBedrock)).toContain("amazon.titan-embed-text-v2:0");
   });
 });
