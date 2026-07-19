@@ -1,5 +1,5 @@
 {
   "name": "undertone",
   "private": true,
-  "workspaces": ["services", "infra"]
+  "workspaces": ["services", "infra", "scripts"]
 }
