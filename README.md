@@ -1,236 +1,448 @@
 # Undertone
 
-Undertone is a real-time audio-intelligence platform: send it live meeting
-audio in 30-second chunks and it hands back a transcript plus contextually
-relevant AI suggestions, per chunk, in one round trip. It's multi-tenant,
-runs on AWS serverless end to end, remembers past sessions, and every
-account brings its own Groq API key — the platform operator pays $0 for
-inference.
+**A multi-tenant, real-time audio-intelligence platform built on AWS serverless.**
 
-## Highlights
+Stream meeting audio to it in 30-second chunks; get back a transcript, three
+contextually-routed AI suggestions, and — because it remembers every session
+you've ever run — suggestions that can cite what you decided in a *previous*
+meeting.
 
-What this project actually demonstrates, end to end:
+It is an API platform, not an app: multi-tenant from the first commit, with
+per-account API keys, per-account encrypted inference credentials, and
+account isolation enforced structurally at every storage boundary.
 
-- **Multi-tenant serverless platform on AWS**, built with CDK (TypeScript)
-  as infrastructure-as-code: API Gateway HTTP API → 9 Lambdas (Node 22) →
-  DynamoDB single-table design, private S3, KMS, SQS + DLQ, and an S3
-  Vectors index — deployed live, not just designed.
-- **Retrieval-augmented generation (RAG) pipeline**: transcript chunks are
-  embedded asynchronously with Bedrock Titan Text Embeddings V2 (1024-dim),
-  stored in an account-namespaced S3 Vectors index, and retrieved to ground
-  both a semantic-search endpoint and live AI suggestions in a user's own
-  history — with async processing (SQS + dead-letter queue) so embedding
-  never blocks the response path.
-- **Security as a structural property, not a checklist**: every database
-  and vector-store lookup derives its key from the *authenticated* caller,
-  never from client input, which makes cross-account data leakage
-  unrepresentable rather than merely checked-for. Platform API keys are
-  peppered-HMAC hashed; per-account third-party API keys are KMS-encrypted
-  at rest; IAM roles are scoped per-Lambda to least privilege.
-- **Production-grade error handling**: every hot-path failure degrades
-  gracefully (a stalled AI call never loses a transcript or blocks a
-  session from ending) while structural failures (auth, ownership,
-  malformed input) fail fast and loud with a consistent error contract.
-- **Test discipline**: 94 automated tests (81 service-layer, 13
-  infrastructure-template assertions) that verify actual command inputs —
-  IAM grants, DynamoDB keys, vector-store filters — not just mocked return
-  values, plus an end-to-end smoke test that exercises the live deployed
-  stack.
-- **AI product design**: a routing-prompt architecture that classifies
-  meeting phase and conversational moment before selecting from six
-  suggestion types, with hallucination guards and graceful history-citation
-  behavior grounded in retrieved context.
+---
+
+## Table of contents
+
+- [What this is](#what-this-is)
+- [Live deployment](#live-deployment)
+- [What it demonstrates](#what-it-demonstrates)
+- [Architecture](#architecture)
+- [AWS services and why each one](#aws-services-and-why-each-one)
+- [Request lifecycle](#request-lifecycle)
+- [API reference](#api-reference)
+- [Quick start](#quick-start)
+- [Project structure](#project-structure)
+- [Design decisions](#design-decisions)
+- [What changed: Phase 1 → Phase 2](#what-changed-phase-1--phase-2)
+- [Testing and verification](#testing-and-verification)
+- [Known limitations](#known-limitations)
+- [Roadmap](#roadmap)
+
+---
+
+## What this is
+
+Undertone began as a meeting-copilot coding challenge and was rebuilt as a
+platform. The core insight it's built around: a live meeting assistant is
+only useful if it says something *specific*. Generic advice ("ask a
+clarifying question") is noise. So the suggestion engine doesn't use a flat
+prompt — it uses a **routing prompt** that first classifies the meeting's
+phase (opening / middle / closing) and the current conversational moment
+(a claim, an unanswered question, confusion, a decision), then selects from
+six suggestion types according to rules tied to those signals.
+
+Phase 2 added the thing that makes it genuinely hard to replicate: **memory**.
+Every transcript chunk is embedded and stored in a per-account vector index,
+and each new chunk retrieves semantically-related moments from the account's
+*other* sessions and injects them into the suggestion prompt. The model is
+instructed to cite them by date. The result is a copilot that can say "on
+2026-07-01 you decided to prioritize the mobile app" instead of "consider
+your priorities."
+
+**Tech:** TypeScript end to end — Node 22 Lambdas, AWS CDK for infrastructure,
+Groq (Whisper + `openai/gpt-oss-120b`) for transcription and generation,
+Amazon Bedrock (Titan Text Embeddings V2) for embeddings, S3 Vectors for
+retrieval.
+
+---
+
+## Live deployment
+
+The stack is deployed and running in AWS (`us-east-1`, stack `Undertone-dev`).
+Currently provisioned:
+
+| Resource | Count |
+|---|---|
+| Lambda functions | 10 |
+| API Gateway HTTP API routes | 8 |
+| IAM roles / scoped policies | 10 / 9 |
+| DynamoDB tables (single-table design) | 1 |
+| S3 buckets (private audio storage) | 1 |
+| S3 Vectors bucket + index | 1 + 1 |
+| SQS queues (work queue + dead-letter) | 2 |
+| KMS keys | 1 |
+
+Every endpoint below has been exercised against the live stack by an
+end-to-end smoke script (`scripts/smoke.ts`), not just by unit tests.
+
+---
+
+## What it demonstrates
+
+Written plainly, because this project exists to show capability:
+
+- **Multi-tenant serverless architecture on AWS**, defined entirely as
+  infrastructure-as-code with CDK (TypeScript) — reproducible from an empty
+  account with two commands.
+- **A production RAG pipeline**: asynchronous embedding via SQS + a worker
+  Lambda, vector storage in an account-namespaced S3 Vectors index, and
+  retrieval that grounds live generation — with the embedding path
+  deliberately kept *off* the request path so a slow model call can never
+  delay a user response.
+- **Security as a structural property.** Every DynamoDB key and every vector
+  query derives its partition from the *authenticated* account, never from
+  client input. Cross-account access isn't "checked for" — it's
+  unrepresentable, because the lookup key an attacker would need cannot be
+  constructed. Platform API keys are stored as peppered HMAC hashes;
+  per-account Groq keys are KMS-encrypted at rest; IAM is scoped per-Lambda
+  to least privilege (only one function can write vectors, only one can
+  encrypt, only two can decrypt).
+- **Failure design.** Every AI call on the hot path degrades gracefully: a
+  suggestion-generation failure still returns the transcript; a summary
+  failure still ends the session. Meanwhile structural failures (bad auth,
+  wrong owner, malformed input) fail fast with a consistent typed error
+  contract. Async failures retry and land in a dead-letter queue.
+- **Test discipline.** 94 automated tests that assert on *recorded AWS
+  command inputs* — the actual DynamoDB keys, IAM policy shapes, S3 object
+  keys, and vector filters being sent — rather than on mocked return values,
+  so a regression that silently broke account isolation would fail CI.
+- **AI engineering judgment**: prompt version control, verbatim prompt
+  porting verified byte-for-byte, hallucination guards, and retrieval scoped
+  to avoid the model restating what's already on screen.
+
+---
 
 ## Architecture
 
 ```
-┌─ Vercel ─────────────────┐      ┌─ AWS ────────────────────────────────────────────┐
-│  Demo app (meeting        │      │  API Gateway (HTTP API, CORS-enabled)            │
-│  copilot, rebuilt as      │─────▶│    ├─ POST /sessions              ─┐             │
-│  platform customer #1)    │      │    ├─ POST /sessions/{id}/chunks ─▶ Lambda: ingest│
-│                           │      │    ├─ GET  /sessions/{id}          │  (Groq Whisper→
-│  Landing page + docs +    │      │    ├─ GET  /search                 │   transcript →
-│  developer dashboard      │      │    ├─ POST /chat                   │   suggestions,│
-│  (roadmap)                │      │    └─ CRUD /webhooks (roadmap)     │   history-aware)
-└──────────────────────────┘      │                                     │             │
-                                   │  DynamoDB (sessions, chunks,       │             │
-                                   │  api keys, webhook subs)     ◀─────┤             │
-                                   │  S3 (raw audio, exports)     ◀─────┤             │
-                                   │  S3 Vectors (embeddings,     ◀─────┤             │
-                                   │  account-namespaced)               │             │
-                                   │  SQS + DLQ ─▶ Lambda: embedWorker ─▶ Bedrock Titan│
-                                   │  SQS ─▶ Lambda: webhook delivery ─▶ customer URLs │
-                                   │  (webhooks: roadmap)                             │
-                                   └───────────────────────────────────────────────────┘
+                          ┌──────────────────────────────────────────────┐
+   client (any app)       │  AWS us-east-1 · stack: Undertone-dev        │
+   ─────────────────      │                                              │
+   POST /v1/sessions      │   ┌────────────────────────┐                 │
+   POST   …/chunks   ────▶│   │ API Gateway (HTTP API) │  CORS enabled   │
+   GET  /v1/search        │   └───────────┬────────────┘                 │
+   POST /v1/chat          │               │ 8 routes → 9 Lambdas         │
+                          │               ▼                              │
+                          │   ┌───────────────────────────────────┐      │
+                          │   │ auth: peppered-HMAC key → GSI     │      │
+                          │   │ lookup → authenticated account    │      │
+                          │   └───────────────┬───────────────────┘      │
+                          │                   ▼                          │
+   ┌──────────────────────┴───────────────────────────────────────┐      │
+   │  ingest (postChunk)                                          │      │
+   │   1. atomic seq claim  ─────────────▶ DynamoDB (conditional) │      │
+   │   2. store audio       ─────────────▶ S3 (private)           │      │
+   │   3. transcribe        ─────────────▶ Groq Whisper           │      │
+   │   4. retrieve history  ─────────────▶ S3 Vectors (best-effort)│     │
+   │   5. suggestions       ─────────────▶ Groq gpt-oss-120b      │      │
+   │   6. persist + enqueue ─────────────▶ DynamoDB + SQS         │      │
+   └──────────────────────┬───────────────────────────────────────┘      │
+                          │                                              │
+                          │   SQS ──▶ embedWorker Lambda ──▶ Bedrock     │
+                          │    │         (async, off hot path)  Titan V2 │
+                          │    │                                    │    │
+                          │    ▼                                    ▼    │
+                          │   DLQ (3 retries)          S3 Vectors index  │
+                          │                            (per-account)     │
+                          │                                              │
+                          │   KMS ── encrypts each account's Groq key    │
+                          └──────────────────────────────────────────────┘
 ```
 
-**Phase 1** shipped the core pipeline: `sessions` + `chunks` API, Groq
-transcription and suggestions, DynamoDB persistence, and API-key auth —
-deployed and smoke-tested live. **Phase 2** (shipped) adds memory/RAG on
-top: async embeddings via Bedrock, an account-namespaced S3 Vectors index,
-semantic `/search`, cross-session history injected into live suggestions,
-and a `/chat` deep-dive endpoint that grounds replies in a session's
-transcript. The Vercel demo app and webhooks are still roadmap (**Phase
-3**) — see the API table below and the design spec for the full plan.
+---
 
-## Quick Start
+## AWS services and why each one
 
-**Prerequisites:** an AWS account, the AWS CLI configured (`aws configure`),
-and the AWS CDK bootstrapped in your target account/region
-(`npx cdk bootstrap`, run once per account/region). Nothing here is deployed
-yet — the calls below assume you've deployed your own dev stack first.
+| Service | Role in the system | Why this one |
+|---|---|---|
+| **API Gateway (HTTP API)** | Public edge for all 8 routes, CORS-enabled | Cheaper and lower-latency than REST APIs; native binary-body support means audio uploads need no multipart parsing |
+| **Lambda (Node 22)** | 9 handlers — one per endpoint, plus the embed worker | Per-endpoint isolation lets IAM be scoped per function; no idle cost between meetings |
+| **DynamoDB** | Single-table store for accounts, sessions, chunks | Single-digit-ms point lookups for auth on every request; conditional writes give atomic sequence claiming without a lock |
+| **S3** | Raw audio chunk storage, fully private | Durable, cheap, and keeps large blobs out of the database |
+| **S3 Vectors** | Per-account embedding index for semantic retrieval | Purpose-built vector storage — no vector database to run, pay-per-use, native metadata filtering for tenant isolation |
+| **SQS + DLQ** | Decouples embedding from the request path; 3 retries then dead-letter | Embedding is slow and failure-prone; the user's response must never wait on it, and failed jobs must not vanish silently |
+| **KMS** | Encrypts each account's Groq API key at rest | Third-party credentials must never sit in plaintext in a database |
+| **Amazon Bedrock** | Titan Text Embeddings V2 (1024-dim) | Managed embeddings with no model hosting; consistent vectors across the whole corpus |
+| **CloudFormation via CDK** | Whole stack as TypeScript infrastructure-as-code | The architecture is reviewable, diffable, and testable — the test suite asserts on the synthesized template |
 
-Deploy the stack:
+---
 
-```bash
-cd infra
-npm run deploy
-```
+## Request lifecycle
 
-This prints three CDK outputs: `ApiUrl`, `TableName`, and `BucketName`. Note
-`ApiUrl` and `TableName` — you'll need them next.
+What happens when a client posts 30 seconds of audio:
 
-Mint an account and platform API key:
+1. **Authenticate.** The `ut_live_…` bearer token is HMAC-hashed with a
+   server-side pepper and looked up through a sparse GSI — a point lookup,
+   never a scan. This resolves the authenticated account id used for
+   everything downstream.
+2. **Claim the sequence number.** A single conditional DynamoDB update
+   increments the session's chunk counter *only if* the session exists,
+   belongs to this account, and is still active. One call yields the next
+   sequence number and proves ownership and liveness simultaneously; a
+   failed condition returns 404 without leaking whether the session exists.
+3. **Persist audio** to a private S3 key namespaced `accountId/sessionId/…`.
+4. **Transcribe** via Groq Whisper (`whisper-large-v3`), using the account's
+   own decrypted Groq key.
+5. **Retrieve memory** — embed the new transcript, query the account's vector
+   index for related moments in *other* sessions. Best-effort: any failure
+   here logs and proceeds with empty history rather than failing the request.
+6. **Generate suggestions** through the routing prompt, with recent
+   transcript, full transcript, previously-shown suggestions (for
+   deduplication), and retrieved history as inputs.
+7. **Persist and enqueue.** The chunk row is written; an SQS message is
+   enqueued for asynchronous embedding. The enqueue is non-fatal — if the
+   queue is unreachable, the caller still gets their transcript.
+8. **Respond** with the transcript and suggestions in a single round trip.
 
-```bash
-TABLE_NAME=<TableName output> npx tsx scripts/create-account.ts "my account"
-```
+Separately, `embedWorker` consumes the queue, embeds the transcript via
+Bedrock, and writes the vector; failures throw so SQS retries, and after
+three attempts the message lands in the dead-letter queue.
 
-This prints an account id and an API key of the form `ut_live_...`. The key
-is shown exactly once — copy it now. Platform keys are stored as a peppered
-HMAC hash, never in plaintext, so if you lose it you'll need to mint a new
-account. If you set `UNDERTONE_PEPPER` when deploying the stack, set that same
-value for this command too, or hashes won't match at auth time.
+---
 
-Store your Groq key on the account (required before transcription/suggestion
-calls will work — Undertone never ships with a shared inference key):
+## API reference
 
-```bash
-curl -X PUT "$API/v1/account/groq-key" \
-  -H "authorization: Bearer ut_live_..." \
-  -H "content-type: application/json" \
-  -d '{"groqKey": "gsk_..."}'
-```
-
-Create a session, post an audio chunk, and end the session:
-
-```bash
-curl -X POST "$API/v1/sessions" \
-  -H "authorization: Bearer ut_live_..." \
-  -H "content-type: application/json" \
-  -d '{"title": "standup"}'
-# → { "id": "01H...", "title": "standup", "kind": "meeting", "status": "active", "createdAt": "..." }
-
-curl -X POST "$API/v1/sessions/01H.../chunks" \
-  -H "authorization: Bearer ut_live_..." \
-  -H "content-type: audio/wav" \
-  --data-binary @services/test/fixtures/hello.wav
-# → { "seq": 1, "transcript": "...", "suggestions": [ { "type": "...", "preview": "...", "detail_prompt": "..." }, ... ] }
-
-curl -X POST "$API/v1/sessions/01H.../end" \
-  -H "authorization: Bearer ut_live_..."
-# → { "id": "01H...", "status": "ended", "summary": "...", "actionItems": [...] }
-```
-
-Once a stack is deployed, run the end-to-end smoke test — it exercises every
-phase-1 and phase-2 endpoint against the live stack and doubles as a demo
-rehearsal:
-
-```bash
-UNDERTONE_API=$API UNDERTONE_KEY=$KEY npx tsx scripts/smoke.ts
-```
-
-## API
-
-Auth on every request: `authorization: Bearer ut_live_...`.
+Every request carries `authorization: Bearer ut_live_…`.
 
 | Method | Path | Description | Status |
 |---|---|---|---|
-| POST | `/v1/sessions` | create session `{title?, kind?: meeting\|interview\|lecture}` | shipped |
-| POST | `/v1/sessions/{id}/chunks` | raw audio body → `{ transcript, suggestions[] }` | shipped |
-| GET | `/v1/sessions/{id}` | full session: transcript, suggestion history, status | shipped |
-| POST | `/v1/sessions/{id}/end` | close session; generates summary + action items | shipped |
-| GET | `/v1/sessions` | list sessions for the account | shipped |
-| PUT | `/v1/account/groq-key` | store the account's Groq key (KMS-encrypted) | shipped |
-| GET | `/v1/search?q=...` | semantic search across the account's sessions | shipped |
-| POST | `/v1/chat` | suggestion/session deep-dive, grounded in transcript | shipped |
-| CRUD | `/v1/webhooks` | manage webhook subscriptions | roadmap (phase 3) |
+| POST | `/v1/sessions` | Create a session — `{title?, kind?: meeting\|interview\|lecture}` | shipped |
+| GET | `/v1/sessions` | List the account's sessions, newest first | shipped |
+| GET | `/v1/sessions/{id}` | Full session: chunks, transcripts, suggestion history | shipped |
+| POST | `/v1/sessions/{id}/chunks` | Raw audio body → `{ seq, transcript, suggestions[] }` | shipped |
+| POST | `/v1/sessions/{id}/end` | Close the session; generate summary + action items | shipped |
+| PUT | `/v1/account/groq-key` | Store the account's Groq key (KMS-encrypted) | shipped |
+| GET | `/v1/search?q=…` | Semantic search across the account's sessions | shipped |
+| POST | `/v1/chat` | Session-grounded deep-dive — `{sessionId, prompt}` → `{reply}` | shipped |
+| CRUD | `/v1/webhooks` | Webhook subscriptions | roadmap |
 
-`/v1/` is reserved for versioning; breaking changes ship as `/v2/`.
+Errors are uniform: `{"error": {"code": "…", "message": "…"}}` with
+meaningful status codes — `401` unauthorized, `402` missing/invalid Groq key,
+`404` not found or not owned, `409` already ended, `422` validation, `502`
+upstream model failure. Internal errors return an opaque `500`; details go to
+CloudWatch, never to the caller.
 
-**Known limitation.** `/v1/search` (and the cross-session history that
-`/v1/sessions/{id}/chunks` retrieves internally) depends on Bedrock Titan
-embeddings, which run through each account's AWS environment. New AWS
-accounts often start with a Bedrock model-invocation quota of `0.0` for
-Titan Embed Text v2 until you request an increase — check and raise it in
-the Service Quotas console (**Service Quotas → AWS services → Amazon
-Bedrock → search "Titan Text Embeddings V2"**) before expecting embeddings
-or search results to appear. Chunk ingestion and `/v1/chat` are unaffected —
-they run through Groq, not Bedrock, and work regardless of Bedrock quota.
-`/v1/chat` is a plain (non-streamed) JSON response today; streaming is
-roadmap.
+`/v1/` is reserved for versioning — breaking changes would ship as `/v2/`.
+
+---
+
+## Quick start
+
+**Prerequisites:** an AWS account with credentials configured
+(`aws configure`), CDK bootstrapped once per account/region
+(`npx cdk bootstrap`), and a Groq API key (free at
+[console.groq.com](https://console.groq.com)).
+
+```bash
+npm install
+
+# 1. Deploy the stack. Set a real pepper — it salts every API key hash.
+export UNDERTONE_PEPPER="$(openssl rand -hex 32)"
+cd infra && npx cdk deploy -c stage=dev && cd ..
+# → outputs ApiUrl, TableName, BucketName, VectorBucketName
+```
+
+```bash
+# 2. Mint an account and platform API key (same pepper as the deploy).
+TABLE_NAME=<TableName output> npx tsx scripts/create-account.ts "my account"
+# → prints ut_live_… ONCE. It is stored only as a hash; save it now.
+```
+
+```bash
+# 3. Store your Groq key on the account — inference is bring-your-own-key,
+#    so the platform operator pays nothing for it.
+curl -X PUT "$API/v1/account/groq-key" \
+  -H "authorization: Bearer $KEY" -H "content-type: application/json" \
+  -d '{"groqKey": "gsk_…"}'
+```
+
+```bash
+# 4. Run a session.
+curl -X POST "$API/v1/sessions" -H "authorization: Bearer $KEY" \
+  -H "content-type: application/json" -d '{"title": "standup"}'
+
+curl -X POST "$API/v1/sessions/<id>/chunks" -H "authorization: Bearer $KEY" \
+  -H "content-type: audio/wav" \
+  --data-binary @services/test/fixtures/hello.wav
+# → { "seq": 1, "transcript": "…", "suggestions": [ … ] }
+
+curl -X POST "$API/v1/sessions/<id>/end" -H "authorization: Bearer $KEY"
+# → { "status": "ended", "summary": "…", "actionItems": [ … ] }
+```
+
+```bash
+# 5. Verify the whole platform end to end against the live stack.
+UNDERTONE_API=$API UNDERTONE_KEY=$KEY npx tsx scripts/smoke.ts
+# → create → chunk → retrieve → end → search → chat → list → SMOKE PASS
+```
+
+---
+
+## Project structure
+
+```
+undertone/
+├── infra/                      AWS CDK app — the entire architecture as code
+│   ├── lib/undertone-stack.ts    every resource, IAM grant, and route
+│   └── test/stack.test.ts        assertions on the synthesized template
+├── services/
+│   ├── src/
+│   │   ├── handlers/             one Lambda per endpoint + embedWorker
+│   │   └── lib/                  auth, dynamo, groq, bedrock, vectors,
+│   │                             prompts, suggestions, errors
+│   └── test/unit/                81 tests asserting on AWS command inputs
+├── scripts/
+│   ├── create-account.ts         mint an account + API key
+│   └── smoke.ts                  end-to-end live verification
+└── README.md
+```
+
+---
 
 ## Design decisions
 
-**Single-table DynamoDB.** One table holds accounts, sessions, and chunks:
-`ACCT#<id>` / `META` for the account row (hashed platform key, encrypted Groq
-key), `ACCT#<id>` / `SESS#<ulid>` for session metadata, and `SESS#<id>` /
-`CHUNK#<seq>` for each transcript segment and suggestion batch. A sparse GSI
-(`GSI1PK = KEYHASH#<hash>`) maps a hashed API key straight to its account —
-auth is always a point lookup, never a scan. ULIDs give sessions
-chronological sort order for free.
+**Single-table DynamoDB.** Accounts, sessions, and chunks share one table:
+`ACCT#<id>/META` for accounts, `ACCT#<id>/SESS#<ulid>` for sessions,
+`SESS#<id>/CHUNK#<seq>` for chunks. A sparse GSI maps a hashed API key
+directly to its account, so authentication is always a point lookup. ULIDs
+give sessions chronological ordering for free, and chunk sort keys are
+zero-padded so lexical order matches numeric order.
 
-**Peppered HMAC API-key hashing.** Platform keys (`ut_live_...`) are hashed
-with HMAC-SHA256 and a server-side pepper before they ever touch DynamoDB
-(see `services/src/lib/auth.ts`). The plaintext key is shown to the caller
-exactly once, at creation, and is never stored or logged again. Losing it
-means minting a new account.
+**Peppered HMAC API keys.** Platform keys are hashed with HMAC-SHA256 plus a
+server-side pepper before touching the database. The plaintext is shown once
+at creation and never stored or logged. A database leak yields no usable
+keys.
 
-**KMS-encrypted BYO Groq keys.** Each account supplies its own Groq API key
-via `PUT /v1/account/groq-key`; it's encrypted with a dedicated KMS key
-before being written to DynamoDB and decrypted in-Lambda only at the moment
-of a Groq call. IAM grants are scoped per-Lambda — only the chunk-ingest and
-end-session handlers can decrypt; only the groq-key handler can encrypt.
+**Bring-your-own inference keys, KMS-encrypted.** Each account supplies its
+own Groq key; it's encrypted with a dedicated KMS key, decrypted in-Lambda
+only at the moment of a model call, and IAM ensures only the handlers that
+need decryption can perform it. This is what makes a public multi-tenant
+deployment cost the operator nothing for inference.
 
-**Graceful degradation on the hot path.** A suggestion-generation failure
-never loses a transcript: `postChunk` returns the transcript with an empty
-`suggestions` array and a `warning` field rather than failing the whole
-request (`services/src/lib/suggestions.ts`'s `generateSuggestionsSafe`).
-Symmetrically, `endSession` always transitions the session to `ended` even
-if summary generation fails — the session's status is never held hostage by
-a downstream AI call. Both paths log the underlying error to CloudWatch and
-surface a `warning` string to the caller instead.
+**Ownership proven before every read.** Chunk rows are keyed by session id
+alone, which carries no ownership signal — so every handler that reads them
+performs an account-scoped ownership check *first*, and the code says so at
+the call site. The test suite asserts this ordering, so a future refactor
+that reordered them would fail.
 
-**Raw binary audio body, not multipart.** `POST /v1/sessions/{id}/chunks`
-takes the audio blob as the literal request body (`content-type: audio/wav`
-or similar), not a multipart form. API Gateway HTTP APIs base64-decode
-binary bodies for you, and skipping multipart parsing keeps the ingest
-Lambda's request handling to a few lines — no form-boundary parsing on the
-hot path.
+**Graceful degradation, deliberately asymmetric.** On the ingest path,
+failures degrade: no suggestions still returns the transcript; a failed
+summary still ends the session; a failed retrieval still produces
+suggestions. But `/v1/search` deliberately does *not* degrade — returning
+`200` with an empty result set when embeddings are down would tell the user
+"nothing matched" when the truth is "we couldn't look." It fails loudly
+instead.
 
-**Fetch-based Groq client with `GROQ_BASE_URL` override.** `services/src/lib/groq.ts`
-is a thin wrapper around the global `fetch`, with no Groq SDK dependency. The
-base URL reads from `GROQ_BASE_URL` (defaulting to `https://api.groq.com`),
-so tests and integration runs can point the Lambdas at a local fake HTTP
-server (`services/test/helpers/fakeGroq.ts`) instead of the real Groq API —
-no network calls, no real API key, in unit tests.
+**Raw binary audio bodies.** Chunks are posted as the literal request body
+with an `audio/*` content type rather than multipart form data — API Gateway
+base64-decodes binary bodies natively, so the ingest handler needs no form
+parsing on the hot path.
 
-**Memory/RAG: async, best-effort, cross-session-only.** Each chunk's
-transcript is embedded with **Bedrock Titan Text Embeddings V2 at 1024
-dimensions** and written to an **account-namespaced S3 Vectors index**
-(every vector's metadata carries `acctId`, and every query filters on it
-with `{ acctId: { $eq: acctId } }` — one account can never retrieve
-another's vectors). Embedding happens off the hot path: `postChunk` enqueues
-a message to SQS (with a DLQ for messages that exhaust their retries)
-instead of calling Bedrock inline, so a slow or throttled embedding call
-never delays the chunk response the caller is waiting on; a separate
-`embedWorker` Lambda consumes the queue and writes the vector.
-Retrieval of `relevant_history` (injected into the suggestion prompt on
-each new chunk) is **best-effort**: if embedding or vector queries fail, the
-handler logs the error, treats history as empty, and still returns 200 — a
-memory outage never blocks transcription or suggestions. By contrast,
-`/v1/search` intentionally fails with a 5xx error on embedding failures to
-avoid silently returning empty results. The suggestion-time retrieval is also
-**cross-session-only** (`excludeSessId` scopes it to the account's *other*
-sessions) — it's meant to surface a relevant decision from a past meeting,
-not restate what's already on screen from the current one.
+**Embedding is asynchronous and idempotent.** Vector writes are keyed by
+`account/session/sequence`, so a retried SQS message overwrites rather than
+duplicates. That makes at-least-once delivery safe without deduplication
+logic.
+
+**Memory is cross-session only.** Retrieval explicitly excludes the current
+session — the model already receives the current transcript in full, so
+including it would just restate what's on screen. Memory exists to surface
+what happened *last time*.
+
+**No SDK for Groq.** The client is a thin `fetch` wrapper whose base URL is
+environment-overridable, so tests point it at a local fake HTTP server —
+real request/response shapes, real error paths, no network and no API key in
+CI.
+
+---
+
+## What changed: Phase 1 → Phase 2
+
+**Phase 1 — the core pipeline.** Multi-tenant sessions API, API-key
+authentication, audio ingestion to S3, Groq transcription, the routing-prompt
+suggestion engine, session summaries with action items, KMS-encrypted
+per-account credentials, and the full CDK stack. Delivered as 12 reviewed
+tasks; deployed and smoke-tested live.
+
+**Phase 2 — memory and retrieval.** Nine further tasks, each independently
+reviewed:
+
+| Added | What it does |
+|---|---|
+| Bedrock embeddings library | Titan Text Embeddings V2 at 1024 dimensions |
+| S3 Vectors library | Account-namespaced writes and metadata-filtered queries |
+| Async embed pipeline | SQS + dead-letter queue + `embedWorker` Lambda, so embedding never blocks a response |
+| `GET /v1/search` | Semantic search across an account's entire history |
+| `relevant_history` injection | Cross-session memory injected into the live suggestion prompt, with date-citation rules |
+| `POST /v1/chat` | Session-grounded deep-dive replies |
+| CORS | Browser clients can call the API directly |
+| Memory-aware smoke test | End-to-end verification including search and chat |
+
+Both phases were built with a plan → task → independent-review workflow: each
+task shipped only after a reviewer verified it against its spec, and each
+phase closed with a whole-branch review covering cross-task seams. Several
+findings were caught this way — including an environment-variable naming
+mismatch that would have broken authentication on the first production
+deploy, and an API response-field inconsistency that would have become a
+breaking change if it had shipped.
+
+---
+
+## Testing and verification
+
+- **81 service tests** — handlers and libraries, asserting on recorded AWS
+  SDK command inputs: the exact DynamoDB keys, S3 object keys, KMS
+  ciphertext, vector filters, and outbound model request bodies (including
+  that the correct model IDs are actually sent).
+- **13 infrastructure tests** — assertions against the synthesized
+  CloudFormation template: route set, table key schema, public-access
+  blocking, dead-letter redrive policy, and IAM least-privilege grants.
+- **End-to-end smoke script** — runs against the live deployed stack,
+  exercising every endpoint in sequence.
+- **Type safety** — `tsc --noEmit` clean across all three workspaces.
+
+```bash
+cd services && npx vitest run     # 81 tests
+cd infra    && npx vitest run     # 13 template assertions
+npx tsx scripts/smoke.ts          # live end-to-end
+```
+
+---
+
+## Known limitations
+
+**Bedrock embedding quota is regional.** Amazon Bedrock sets on-demand model
+quotas per region, and new AWS accounts frequently receive a quota of **0
+requests/minute** for Titan Text Embeddings V2 in `us-east-1` — a quota that
+is *not* adjustable through the Service Quotas console. Other regions
+(`us-west-2`, `us-east-2`, `eu-west-1`) start at 6000 rpm on the same
+account, so the embedding client targets a region with available capacity
+while the rest of the stack stays in `us-east-1`. The extra cross-region
+latency is absorbed entirely by the asynchronous embed worker and never
+touches the request path. Ingestion, transcription, suggestions, summaries,
+and chat run through Groq and are unaffected by Bedrock capacity either way.
+
+**Chat is not streamed.** `/v1/chat` returns a complete JSON reply. Streaming
+requires a Lambda Function URL (API Gateway HTTP APIs don't stream) and is
+deferred.
+
+**Pagination.** Session listing is capped at 50 and the per-session chunk
+query is unpaginated; a session long enough to exceed DynamoDB's 1 MB query
+limit would silently truncate. Fine at demo scale, tracked for long sessions.
+
+**Batch retries.** The embed worker fails an entire SQS batch on a single bad
+message rather than reporting partial batch failures. Vector writes are
+idempotent so this is wasteful rather than incorrect.
+
+---
+
+## Roadmap
+
+**Phase 3 — platform surface.** Webhook subscriptions with HMAC-signed
+delivery (SQS-backed, dead-lettered), a developer dashboard for key and
+session management, per-account rate limiting, and a public demo application
+consuming the platform as its first customer.
+
+**Beyond.** Streaming chat via Lambda Function URLs, speaker diarization,
+and richer post-meeting artifacts.
