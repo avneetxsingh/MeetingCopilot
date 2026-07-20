@@ -3,34 +3,75 @@
 Undertone is a real-time audio-intelligence platform: send it live meeting
 audio in 30-second chunks and it hands back a transcript plus contextually
 relevant AI suggestions, per chunk, in one round trip. It's multi-tenant,
-runs on AWS serverless end to end, and every account brings its own Groq API
-key — the platform operator pays $0 for inference.
+runs on AWS serverless end to end, remembers past sessions, and every
+account brings its own Groq API key — the platform operator pays $0 for
+inference.
+
+## Highlights
+
+What this project actually demonstrates, end to end:
+
+- **Multi-tenant serverless platform on AWS**, built with CDK (TypeScript)
+  as infrastructure-as-code: API Gateway HTTP API → 9 Lambdas (Node 22) →
+  DynamoDB single-table design, private S3, KMS, SQS + DLQ, and an S3
+  Vectors index — deployed live, not just designed.
+- **Retrieval-augmented generation (RAG) pipeline**: transcript chunks are
+  embedded asynchronously with Bedrock Titan Text Embeddings V2 (1024-dim),
+  stored in an account-namespaced S3 Vectors index, and retrieved to ground
+  both a semantic-search endpoint and live AI suggestions in a user's own
+  history — with async processing (SQS + dead-letter queue) so embedding
+  never blocks the response path.
+- **Security as a structural property, not a checklist**: every database
+  and vector-store lookup derives its key from the *authenticated* caller,
+  never from client input, which makes cross-account data leakage
+  unrepresentable rather than merely checked-for. Platform API keys are
+  peppered-HMAC hashed; per-account third-party API keys are KMS-encrypted
+  at rest; IAM roles are scoped per-Lambda to least privilege.
+- **Production-grade error handling**: every hot-path failure degrades
+  gracefully (a stalled AI call never loses a transcript or blocks a
+  session from ending) while structural failures (auth, ownership,
+  malformed input) fail fast and loud with a consistent error contract.
+- **Test discipline**: 94 automated tests (81 service-layer, 13
+  infrastructure-template assertions) that verify actual command inputs —
+  IAM grants, DynamoDB keys, vector-store filters — not just mocked return
+  values, plus an end-to-end smoke test that exercises the live deployed
+  stack.
+- **AI product design**: a routing-prompt architecture that classifies
+  meeting phase and conversational moment before selecting from six
+  suggestion types, with hallucination guards and graceful history-citation
+  behavior grounded in retrieved context.
 
 ## Architecture
 
 ```
-┌─ Vercel ─────────────────┐      ┌─ AWS ────────────────────────────────────┐
-│  Demo app (meeting        │      │  API Gateway (HTTP API)                  │
-│  copilot, rebuilt as      │─────▶│    ├─ POST /sessions        ─┐           │
-│  platform customer #1)    │      │    ├─ POST /sessions/{id}/chunks ─▶ Lambda: ingest
-│                           │      │    ├─ GET  /sessions/{id}    │      (Groq Whisper →
-│  Landing page + docs +    │      │    ├─ GET  /search           │       transcript →
-│  developer dashboard      │      │    └─ CRUD /webhooks         │       suggestions →
-└──────────────────────────┘      │                               │       embeddings)
-                                   │  DynamoDB (sessions, chunks, │           │
-                                   │  api keys, webhook subs)     ◀───────────┤
-                                   │  S3 (raw audio, exports)     ◀───────────┤
-                                   │  S3 Vectors (embeddings)     ◀───────────┤
-                                   │  SQS ─▶ Lambda: webhook delivery ─▶ customer URLs
-                                   └──────────────────────────────────────────┘
+┌─ Vercel ─────────────────┐      ┌─ AWS ────────────────────────────────────────────┐
+│  Demo app (meeting        │      │  API Gateway (HTTP API, CORS-enabled)            │
+│  copilot, rebuilt as      │─────▶│    ├─ POST /sessions              ─┐             │
+│  platform customer #1)    │      │    ├─ POST /sessions/{id}/chunks ─▶ Lambda: ingest│
+│                           │      │    ├─ GET  /sessions/{id}          │  (Groq Whisper→
+│  Landing page + docs +    │      │    ├─ GET  /search                 │   transcript →
+│  developer dashboard      │      │    ├─ POST /chat                   │   suggestions,│
+│  (roadmap)                │      │    └─ CRUD /webhooks (roadmap)     │   history-aware)
+└──────────────────────────┘      │                                     │             │
+                                   │  DynamoDB (sessions, chunks,       │             │
+                                   │  api keys, webhook subs)     ◀─────┤             │
+                                   │  S3 (raw audio, exports)     ◀─────┤             │
+                                   │  S3 Vectors (embeddings,     ◀─────┤             │
+                                   │  account-namespaced)               │             │
+                                   │  SQS + DLQ ─▶ Lambda: embedWorker ─▶ Bedrock Titan│
+                                   │  SQS ─▶ Lambda: webhook delivery ─▶ customer URLs │
+                                   │  (webhooks: roadmap)                             │
+                                   └───────────────────────────────────────────────────┘
 ```
 
-Phase 1 implements the core pipeline: `sessions` + `chunks` API, Groq
-transcription and suggestions, DynamoDB persistence, and API-key auth. Phase
-2 (this repo, today) adds memory/RAG on top: async embeddings, semantic
-`/search`, and a `/chat` deep-dive endpoint that grounds replies in a
-session's transcript. The Vercel demo app and webhooks are still roadmap —
-see the API table below and the design spec for the full three-phase plan.
+**Phase 1** shipped the core pipeline: `sessions` + `chunks` API, Groq
+transcription and suggestions, DynamoDB persistence, and API-key auth —
+deployed and smoke-tested live. **Phase 2** (shipped) adds memory/RAG on
+top: async embeddings via Bedrock, an account-namespaced S3 Vectors index,
+semantic `/search`, cross-session history injected into live suggestions,
+and a `/chat` deep-dive endpoint that grounds replies in a session's
+transcript. The Vercel demo app and webhooks are still roadmap (**Phase
+3**) — see the API table below and the design spec for the full plan.
 
 ## Quick Start
 
