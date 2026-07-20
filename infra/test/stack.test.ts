@@ -140,5 +140,8 @@ describe("UndertoneStack", () => {
     const withBedrock = Object.values(policies).filter((p) => JSON.stringify(p).includes("bedrock:InvokeModel"));
     expect(withBedrock.length).toBe(3); // embedWorker, postChunk, search
     expect(JSON.stringify(withBedrock)).toContain("amazon.titan-embed-text-v2:0");
+    // us-east-1 on-demand Titan quota is 0 and non-adjustable; the ARN must name
+    // us-east-2, the region actually invoked (see embeddings.ts / BEDROCK_REGION env).
+    expect(JSON.stringify(withBedrock)).toContain("arn:aws:bedrock:us-east-2::foundation-model/amazon.titan-embed-text-v2:0");
   });
 });

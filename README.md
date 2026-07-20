@@ -231,7 +231,7 @@ Every request carries `authorization: Bearer ut_live_…`.
 | POST | `/v1/sessions/{id}/chunks` | Raw audio body → `{ seq, transcript, suggestions[] }` | shipped |
 | POST | `/v1/sessions/{id}/end` | Close the session; generate summary + action items | shipped |
 | PUT | `/v1/account/groq-key` | Store the account's Groq key (KMS-encrypted) | shipped |
-| GET | `/v1/search?q=…` | Semantic search across the account's sessions | shipped |
+| GET | `/v1/search?q=…` | Semantic search across the account's sessions | built; blocked on Bedrock access — see [Known limitations](#known-limitations) |
 | POST | `/v1/chat` | Session-grounded deep-dive — `{sessionId, prompt}` → `{reply}` | shipped |
 | CRUD | `/v1/webhooks` | Webhook subscriptions | roadmap |
 
@@ -431,16 +431,32 @@ npx tsx scripts/smoke.ts          # live end-to-end
 
 ## Known limitations
 
-**Bedrock embedding quota is regional.** Amazon Bedrock sets on-demand model
-quotas per region, and new AWS accounts frequently receive a quota of **0
-requests/minute** for Titan Text Embeddings V2 in `us-east-1` — a quota that
-is *not* adjustable through the Service Quotas console. Other regions
-(`us-west-2`, `us-east-2`, `eu-west-1`) start at 6000 rpm on the same
-account, so the embedding client targets a region with available capacity
-while the rest of the stack stays in `us-east-1`. The extra cross-region
-latency is absorbed entirely by the asynchronous embed worker and never
-touches the request path. Ingestion, transcription, suggestions, summaries,
-and chat run through Groq and are unaffected by Bedrock capacity either way.
+**Embeddings are blocked on Bedrock account access — the memory features are
+built and tested but not yet proven end to end.** Amazon Bedrock gates
+on-demand model inference per account and per region. On the account this was
+developed against, `InvokeModel` for Titan Text Embeddings V2 returns
+`ThrottlingException` in every region tested (`us-east-1`, `us-west-2`,
+`us-east-2`) — including regions where the Service Quotas API *reports* 6000
+requests/minute, so the reported quota does not reflect actual entitlement.
+Raising it requires an AWS Support case, not a console request.
+
+Concretely, this means:
+
+- `POST /v1/sessions/{id}/chunks` works fully — transcription and suggestions
+  are unaffected, because retrieval is best-effort and degrades silently when
+  embeddings are unavailable. Verified live.
+- `GET /v1/search` returns `500` — it authenticates correctly and reaches the
+  embedding call, then fails there. Verified live.
+- No vectors are written, so cross-session history is always empty and the
+  date-citation behaviour cannot be demonstrated yet.
+
+The embedding client's region is configurable via `BEDROCK_REGION` so this
+resolves with a redeploy once access is granted. Everything else — ingestion,
+transcription, suggestions, summaries, `/v1/chat`, and the whole storage and
+auth layer — runs through Groq and DynamoDB and is fully working.
+
+Documented rather than hidden, because a README that claims a feature works
+when it doesn't is worse than one that says exactly where the edge is.
 
 **Chat is not streamed.** `/v1/chat` returns a complete JSON reply. Streaming
 requires a Lambda Function URL (API Gateway HTTP APIs don't stream) and is

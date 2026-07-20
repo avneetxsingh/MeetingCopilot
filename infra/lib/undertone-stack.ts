@@ -24,6 +24,12 @@ export class UndertoneStack extends Stack {
   constructor(scope: Construct, id: string, props?: UndertoneStackProps) {
     super(scope, id, props);
     const stage = props?.stage ?? "dev";
+    // us-east-1 on-demand Titan quota is 0 and non-adjustable; us-west-2 has 6000 rpm.
+    // Named const so the Lambda env var and the IAM ARN can never drift apart.
+    // Bedrock on-demand quotas are per-region. This account has 0 req/min for
+    // Titan Embed V2 in us-east-1 AND us-west-2 (non-adjustable); us-east-2 and
+    // eu-west-1 have 6000. Verified empirically, not from docs.
+    const bedrockRegion = "us-east-2";
 
     const table = new dynamodb.Table(this, "Table", {
       partitionKey: { name: "PK", type: dynamodb.AttributeType.STRING },
@@ -77,6 +83,7 @@ export class UndertoneStack extends Stack {
           KEY_PEPPER: process.env.UNDERTONE_PEPPER ?? "dev-pepper-change-me",
           VECTOR_BUCKET: vectorBucketName,
           VECTOR_INDEX: vectorIndexName,
+          BEDROCK_REGION: bedrockRegion,
           ...(process.env.GROQ_BASE_URL ? { GROQ_BASE_URL: process.env.GROQ_BASE_URL } : {}),
         },
       });
@@ -109,7 +116,11 @@ export class UndertoneStack extends Stack {
     table.grantReadData(chat);
     groqKms.grantDecrypt(chat);
 
-    const titanArn = `arn:aws:bedrock:${this.region}::foundation-model/amazon.titan-embed-text-v2:0`;
+    // search only needs the auth GSI lookup, but requireAccount runs in EVERY
+    // handler — a function without table read cannot authenticate at all.
+    table.grantReadData(search);
+
+    const titanArn = `arn:aws:bedrock:${bedrockRegion}::foundation-model/amazon.titan-embed-text-v2:0`;
     const vectorIndexArn = `arn:aws:s3vectors:${this.region}:${this.account}:bucket/${vectorBucketName}/index/${vectorIndexName}`;
     const bedrockInvoke = new iam.PolicyStatement({ actions: ["bedrock:InvokeModel"], resources: [titanArn] });
     for (const f of [embedWorker, postChunk, search]) f.addToRolePolicy(bedrockInvoke);
