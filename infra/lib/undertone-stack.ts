@@ -119,6 +119,8 @@ export class UndertoneStack extends Stack {
     for (const f of [postChunk, search])
       f.addToRolePolicy(
         new iam.PolicyStatement({
+          // GetVectors looks unused but is required by AWS alongside QueryVectors
+          // when returnMetadata/returnDistance are set (per the SDK docs) — do not trim.
           actions: ["s3vectors:QueryVectors", "s3vectors:GetVectors"],
           resources: [vectorIndexArn],
         }),

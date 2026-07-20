@@ -57,7 +57,9 @@ if (searchRes.status >= 500) {
   if (hits.length >= 1) {
     console.log(`✓ search returned ${hits.length} hits`);
   } else {
-    console.log("⚠ search skipped: embeddings blocked on Bedrock quota (see ledger)");
+    console.log(
+      "⚠ search returned 0 hits — could be quota (no vectors embedded yet) OR a real search bug; investigate before demo",
+    );
   }
 } else {
   throw new Error(`GET ${searchPath} → ${searchRes.status}: ${JSON.stringify(searchBody)}`);
