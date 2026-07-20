@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, test } from "vitest";
 import { mockClient } from "aws-sdk-client-mock";
 import { BedrockRuntimeClient, InvokeModelCommand } from "@aws-sdk/client-bedrock-runtime";
-import { EMBED_DIM, embedText } from "../../src/lib/embeddings";
+import { BEDROCK_REGION, EMBED_DIM, embedText } from "../../src/lib/embeddings";
 
 const brMock = mockClient(BedrockRuntimeClient);
 beforeEach(() => brMock.reset());
@@ -9,6 +9,11 @@ beforeEach(() => brMock.reset());
 const bodyBytes = (obj: unknown) => new TextEncoder().encode(JSON.stringify(obj));
 
 describe("embedText", () => {
+  test("bedrock client targets us-east-2 where Titan quota is available", () => {
+    // us-east-1 on-demand Titan quota is 0 and non-adjustable on this account;
+    // us-east-2 has 6000 rpm. Guards against silently reverting to the default region.
+    expect(BEDROCK_REGION).toBe("us-east-2");
+  });
   test("sends titan v2 request and returns the embedding", async () => {
     const fake = Array.from({ length: EMBED_DIM }, (_, i) => i / EMBED_DIM);
     brMock.on(InvokeModelCommand).resolves({ body: bodyBytes({ embedding: fake }) } as never);
